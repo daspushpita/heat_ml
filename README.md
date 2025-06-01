@@ -62,7 +62,7 @@ Use the trained model to predict the next time step and compare with the true PD
 
 ## 📈 Sample Output
 
-![Prediction vs Ground Truth](docs/sample_output.png)
+
 
 ## 📌 Notes
 
