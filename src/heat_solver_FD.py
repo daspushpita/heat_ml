@@ -14,7 +14,7 @@ class heat_solver_1d:
         self.cfl = cfl
         self.tmax = tmax
         self.x = np.linspace(self.x1min, self.x1max, self.nx)
-        self.dx = (self.x1max - self.x1min) / self.nx 
+        self.dx = (self.x1max - self.x1min) / (self.nx - 1)
         self.diff_cons = diff_cons
         self.output_dir = output_dir
         self.npz_file = npz_file
@@ -54,16 +54,15 @@ class heat_solver_1d:
             u_sol_new[0] = 0.0
             u_sol_new[-1] = 0.0
             
-            u_sol_new[1:-1] = u_sol[1:-1] + self.diff_cons * (u_sol[0:-2] - \
+            u_sol_new[1:-1] = u_sol[1:-1] + (self.diff_cons * dt / self.dx**2) * (u_sol[0:-2] - \
                                             2.0 * u_sol[1:-1] + u_sol[2:])
         
             #Update the u_sol with the new t value
-            u_sol = u_sol_new.copy()
-            u_store[step,:] = u_sol_new.copy()
-            
             t += dt
             time_array.append(t)
             step += 1
+            u_sol = u_sol_new.copy()
+            u_store[step,:] = u_sol
             
             if not self.npz_file:
                 # Save current snapshot as CSV
