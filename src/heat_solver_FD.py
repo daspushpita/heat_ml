@@ -20,7 +20,11 @@ class heat_solver_1d:
         self.npz_file = npz_file
     
         if not self.npz_file:
-            self.output_dir = output_dir or "../data"
+            if output_dir:
+                self.output_dir = os.path.join(output_dir, f"diffusion{self.diff_cons}")
+            else:
+                self.output_dir = f"../data/diffusion{self.diff_cons}"
+                
             os.makedirs(self.output_dir, exist_ok=True)
         else:
             self.output_dir = None
