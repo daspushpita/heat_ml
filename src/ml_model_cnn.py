@@ -51,12 +51,12 @@ class ml_models():
         """
         # Input shape: (nx, 1) — scalar value at each grid point
         inputs = Input(shape=(self.nx, self.dim), name = 'input_layer')
-        x = layers.Conv1D(6, kernel_size=3, padding='same', activation='relu', name='conv_l1')(inputs)
-        x = layers.Conv1D(6, kernel_size=3, padding='same', activation='relu',name='conv_l2')(x)
+        x = layers.Conv1D(9, kernel_size=3, padding='same', activation='relu', name='conv_l1')(inputs)
+        x = layers.Conv1D(9, kernel_size=3, padding='same', activation='relu',name='conv_l2')(x)
         if K > 1:
             x = layers.Conv1D(6, kernel_size=3, padding='same', activation='relu',name='conv_l3')(x)
             
-        x = layers.TimeDistributed(layers.Dense(128, activation='relu'), name='neural')(x)
+        x = layers.TimeDistributed(layers.Dense(136, activation='relu'), name='neural')(x)
         output = layers.Conv1D(K, kernel_size=1, padding='same', name='output')(x)
         model_cnn = models.Model(inputs=inputs, outputs=output)
         return model_cnn
