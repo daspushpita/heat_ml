@@ -65,7 +65,7 @@ This generates training data using a 1D finite-difference solver.
 
 ### 3. Make Predictions
 
-Use the trained model to predict the next time step and compare with the true PDE solution. See `notebooks/visualize.ipynb` for examples.
+Use the trained model to predict the next time step and compare with the true PDE solution. See `notebooks/pinn_continuous.ipynb` for examples.
 
 ## 📈 Sample Output
 
