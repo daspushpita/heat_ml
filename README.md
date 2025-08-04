@@ -62,6 +62,9 @@ Use the trained model to predict the next time step and compare with the true PD
 
 ## 📈 Sample Output
 
+![Heat Equation Animation](outputs/figures/pinn_heat_animation.gif)
+
+> PINN-predicted solution vs ground truth over time.
 
 
 ## 📌 Notes
