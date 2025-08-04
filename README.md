@@ -1,6 +1,11 @@
 # 1D Heat Equation Solver with CNN Forecasting
 
-This project implements a numerical solver for the 1D heat equation using the explicit Euler method and uses a 1D Convolutional Neural Network (CNN) to predict the time evolution of the field `u(x, t)`.
+
+This project implements a numerical solver for the 1D heat equation using the explicit Euler method and develops two machine learning approaches to learn the dynamics:
+- A 1D Convolutional Neural Network (CNN) that predicts the time evolution of the field `u(x, t)`.
+- A Physics-Informed Neural Network (PINN) that embeds the governing PDE directly into the training process.
+
+We are currently extending this framework to generalize across different diffusion coefficients D
 
 ## 🔬 Problem Overview
 
@@ -12,6 +17,8 @@ We solve the 1D diffusion equation:
 
 - Discretized using finite differences and evolved using the explicit Euler scheme.
 - The model learns to map `u(x)^n` to `u(x)^{n+1}` using a CNN.
+- The PINN model is trained to satisfy the PDE using randomly sampled collocation points, initial, and boundary conditions.
+- Future versions will support diffusion coefficient variation during training and inference.
 
 ## 🛠️ Project Structure
 
