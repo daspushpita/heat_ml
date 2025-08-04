@@ -112,7 +112,7 @@ class pinn_models():
         self.learning_rate= learning_rate
         np.random.seed(42)  # Set seed once
         
-    def data_generator(self, IC, BC, CP):
+    def pinn_data_generator(self, IC, BC, CP):
         
         if IC==True:
             data = pd.read_csv(self.data_path+'data_0000.csv')
@@ -124,8 +124,9 @@ class pinn_models():
             u_xt_ic = u_xt[idx]
             x_tf_ic = tf.convert_to_tensor(x_ic, dtype=tf.float32)
             t_tf_ic = tf.convert_to_tensor(t_ic, dtype=tf.float32)
-            u_tf_ic = tf.convert_to_tensor(u_xt_ic, dtype=tf.float32)
-            X_input = tf.concat([x_tf_ic, t_tf_ic], axis=1)
+            u_tf_ic = tf.convert_to_tensor(u_xt_ic.to_numpy()[:, None], dtype=tf.float32)
+            # X_input = tf.concat([x_tf_ic, t_tf_ic], axis=1)
+            X_input = tf.concat([x_tf_ic[:, None], t_tf_ic[:, None]], axis=1)
             return X_input, u_tf_ic
         
         else:
@@ -133,11 +134,11 @@ class pinn_models():
             nt = len(files) - 1 #Ignoring the initial condition
             time_array = np.zeros((nt))
             var_u_all = np.zeros((nt, self.resolution, 3))
-            for i, file in enumerate(files):
+            for i, file in enumerate(files[1:]):
                 data_all = pd.read_csv(os.path.join(self.data_path, file))
-                var_u = data.filter(like='u_t').values.flatten()
+                var_u = data_all.filter(like='u_t').values.flatten()
                 var_t = data_all["t"].iloc[0]
-                var_x = data["x"]
+                var_x = data_all["x"]
                 time_array[i] = var_t
                 var_u_all[i, :, 0] = var_u
                 var_u_all[i, :, 1] = var_t
@@ -146,14 +147,11 @@ class pinn_models():
             if BC == True:
                 idt = np.random.choice(len(time_array), size=self.N_BC, replace=False)
                 t_bc = time_array[idt]
-                x_bc = np.random.choice([0.0, 1.0], size=self.N_BC)
-                u_bc = np.zeros_like(x_bc)
-                
-                for i in range(self.N_BC):
-                    if x_bc[i] == 0.0:
-                        u_bc[i] = var_u_all[idt[i], 0, 0]  # u at x=0
-                    else:
-                        u_bc[i] = var_u_all[idt[i], -1, 0]  # u at x=1
+
+                # Repeat x=0 and x=1 for each sampled time
+                x_bc = np.tile([0.0, 1.0], self.N_BC)  # shape (2*N_BC,)
+                t_bc = np.repeat(t_bc, 2)             # shape (2*N_BC,)
+                u_bc = np.zeros_like(x_bc)            # (e.g., Dirichlet BC: u=0 at both ends)
 
                 # Convert to tensors
                 x_tf_bc = tf.convert_to_tensor(x_bc[:, None], dtype=tf.float32)
@@ -176,7 +174,7 @@ class pinn_models():
             else:
                 raise ValueError("Train Data type not specified")
 
-    def build_pinnmodel(self, n_hidden=4, n_neurons=64):
+    def build_pinnmodel(self, n_hidden=4, n_neurons=50):
         
         inputs = Input(shape=(2,), name = 'input_layer')
         x = inputs
@@ -191,28 +189,31 @@ class pinn_models():
 
         x_tf = X_tensor[:, 0:1]
         t_tf = X_tensor[:, 1:2]
-        X_input = tf.concat([x_tf, t_tf], axis=1)  # shape (N, 2)
-        with tf.GradientTape(persistent=True) as tape:
-            tape.watch([x_tf, t_tf])
-            u = self.model_cont(X_input)
-            u_x = tape.gradient(u, x_tf)
-            u_xx = tape.gradient(u_x, x_tf)
-            u_t = tape.gradient(u, t_tf)
+        with tf.GradientTape(persistent=True) as tape2:
+            tape2.watch([x_tf, t_tf])
+            with tf.GradientTape(persistent=True) as tape1:
+                tape1.watch([x_tf, t_tf])
+                X_input = tf.concat([x_tf, t_tf], axis=1)  # shape (N, 2)
+                u = self.model_cont(X_input)
+            u_x = tape1.gradient(u, x_tf)
+            u_t = tape1.gradient(u, t_tf)
+                
+        u_xx = tape2.gradient(u_x, x_tf)
         
         f = u_t - diff_const * u_xx
         return f
     
     def loss_terms(self, diff_const):
         
-        X_ic_input, u_ic = self.data_generator(IC=True, BC=False, CP=False)
+        X_ic_input, u_ic = self.pinn_data_generator(IC=True, BC=False, CP=False)
         u_ic_pred = self.model_cont (X_ic_input)
         loss_ic = tf.reduce_mean(tf.square(u_ic - u_ic_pred))
         
-        X_bc_input, u_bc = self.data_generator(IC=False, BC=True, CP=False)
+        X_bc_input, u_bc = self.pinn_data_generator(IC=False, BC=True, CP=False)
         u_bc_pred = self.model_cont (X_bc_input)
         loss_bc = tf.reduce_mean(tf.square(u_bc - u_bc_pred))
         
-        X_cp_input = self.data_generator(IC=False, BC=False, CP=True)
+        X_cp_input = self.pinn_data_generator(IC=False, BC=False, CP=True)
         loss_pde = tf.reduce_mean(tf.square(self.pde_residual(diff_const, X_cp_input)))
         
         loss = loss_ic + loss_bc + loss_pde
