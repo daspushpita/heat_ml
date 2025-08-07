@@ -81,3 +81,118 @@ class data_generator():
             return X_train, Y_train, X_test, Y_test, x_grid
         else:
             return X_train, Y_train, X_test, Y_test
+        
+        
+    def pinn_data_generator_gen(self, IC, BC, CP):
+        
+        if IC==True:
+            x_list_ic = []
+            t_list_ic = []
+            d_list_ic = []
+            u_list_ic = []
+            
+            id_D = np.random.choice(self.diffusion_coeff, size=self.N_diff, replace=False)
+            
+            for D_coeff in id_D:
+                datapath = self.data_path+f'/diffusion{D_coeff}/'%D_coeff
+                data = pd.read_csv(datapath+'/data_0000.csv')
+                
+                x = data['x']
+                u_xt = data['u_t0']
+                idx = np.random.choice(len(x), size=self.N_IC, replace=False)
+                
+                x_ic = x[idx]
+                t_ic = np.zeros_like(x_ic)
+                u_xt_ic = u_xt[idx]
+                diff_ic = np.full_like(x_ic, D_coeff)
+
+                x_list_ic.append(x_ic.to_numpy()[:, None])
+                t_list_ic.append(t_ic[:, None])
+                d_list_ic.append(diff_ic[:, None])
+                u_list_ic.append(u_xt_ic.to_numpy()[:, None])
+
+            x_tf_ic = tf.convert_to_tensor(np.vstack(x_list_ic), dtype=tf.float32)
+            t_tf_ic = tf.convert_to_tensor(np.vstack(t_list_ic), dtype=tf.float32)
+            diff_tf_ic = tf.convert_to_tensor(np.vstack(d_list_ic), dtype=tf.float32)
+            u_tf_ic = tf.convert_to_tensor(np.vstack(u_list_ic), dtype=tf.float32)
+            X_input = tf.concat([x_tf_ic, t_tf_ic, diff_tf_ic], axis=1)
+            return X_input, u_tf_ic
+        
+        else:
+            if BC == True:
+                x_list_bc = []
+                t_list_bc = []
+                d_list_bc = []
+                u_list_bc = []
+                
+                id_D = np.random.choice(self.diffusion_coeff, size=self.N_diff, replace=False)
+                
+                for D_coeff in id_D:
+                    datapath = self.data_path+f'/diffusion{D_coeff}/'%D_coeff
+                    files = sorted([f for f in os.listdir(datapath) if f.startswith('data_') and f.endswith('.csv')])
+                    nt = len(files) - 1 #Ignoring the initial condition
+                    time_array = np.zeros((nt))
+                    for i, file in enumerate(files[1:]):
+                        data_all = pd.read_csv(os.path.join(datapath, file))
+                        var_t = data_all["t"].iloc[0]
+                        time_array[i] = var_t
+
+                    idt = np.random.choice(len(time_array), size=self.N_BC, replace=False)
+                    t_bc = time_array[idt]
+
+                    # Repeat x=0 and x=1 for each sampled time
+                    x_bc = np.tile([0.0, 1.0], self.N_BC)  # shape (2*N_BC,)
+                    t_bc = np.repeat(t_bc, 2)             # shape (2*N_BC,)
+                    u_bc = np.zeros_like(x_bc)            # (e.g., Dirichlet BC: u=0 at both ends)
+                    diff_bc = np.full_like(x_bc, D_coeff)
+                    
+                    x_list_bc.append(x_bc[:, None])
+                    t_list_bc.append(t_bc[:, None])
+                    d_list_bc.append(diff_bc[:, None])
+                    u_list_bc.append(u_bc[:, None])
+                    
+                # Convert to tensors
+                x_tf_bc = tf.convert_to_tensor(np.vstack(x_list_bc), dtype=tf.float32)
+                t_tf_bc = tf.convert_to_tensor(np.vstack(t_list_bc), dtype=tf.float32)
+                u_tf_bc = tf.convert_to_tensor(np.vstack(u_list_bc), dtype=tf.float32)
+                diff_tf_bc = tf.convert_to_tensor(np.vstack(d_list_bc), dtype=tf.float32)
+
+                X_input = tf.concat([x_tf_bc, t_tf_bc, diff_tf_bc], axis=1)
+                return X_input, u_tf_bc
+            
+            elif CP == True:
+                
+                x_list_cp = []
+                t_list_cp = []
+                d_list_cp = []
+                
+                id_D = np.random.choice(self.diffusion_coeff, size=self.N_diff, replace=False)
+                
+                for D_coeff in id_D:
+                    datapath = self.data_path+f'/diffusion{D_coeff}/'%D_coeff
+                    files = sorted([f for f in os.listdir(datapath) if f.startswith('data_') and f.endswith('.csv')])
+                    nt = len(files) - 1 #Ignoring the initial condition
+                    time_array = np.zeros((nt))
+                    for i, file in enumerate(files[1:]):
+                        data_all = pd.read_csv(os.path.join(datapath, file))
+                        var_t = data_all["t"].iloc[0]
+                        time_array[i] = var_t             
+                
+                    x_cp = np.random.uniform(0.0, 1.0, size=self.N_CP)
+                    t_cp = np.random.uniform(np.min(time_array), np.max(time_array), size=self.N_CP)
+                    diff_cp = np.full_like(x_cp, D_coeff)
+                    
+                    x_list_cp.append(x_cp[:, None])
+                    t_list_cp.append(t_cp[:, None])
+                    d_list_cp.append(diff_cp[:, None])
+
+                # Convert to tensors
+                x_tf_cp = tf.convert_to_tensor(np.vstack(x_list_cp), dtype=tf.float32)
+                t_tf_cp = tf.convert_to_tensor(np.vstack(t_list_cp), dtype=tf.float32)
+                diff_tf_cp = tf.convert_to_tensor(np.vstack(d_list_cp), dtype=tf.float32)
+
+                X_input = tf.concat([x_tf_cp, t_tf_cp, diff_tf_cp], axis=1)
+                return X_input
+            
+            else:
+                raise ValueError("Train Data type not specified")

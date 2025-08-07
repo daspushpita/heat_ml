@@ -3,7 +3,11 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import datasets, layers, models, Input, regularizers
+from data_generator import pinn_gen_D
+from mpi4py import MPI
 
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
 
 class cnn_models():
     """
@@ -86,7 +90,7 @@ class cnn_models():
         return model_cnn
     
 
-class pinn_models():
+class single_pinn_model():
     """
     A class that defines  Physics-informed Neural Network models for learning PDE dynamics.
 
@@ -94,8 +98,8 @@ class pinn_models():
         nx (int): Number of spatial grid points in the input profile.
     """
     def __init__(self, data_path, resolution, 
-                 N_IC, N_BC, N_CP, 
-                 epoch=1000, 
+                 N_IC, N_BC, N_CP, N_diff,
+                 epoch=1000, diffusion_coeff=None,
                  learning_rate=1.e-3,
                  *args, **kwargs):
         """
@@ -108,11 +112,13 @@ class pinn_models():
         self.N_IC = N_IC
         self.N_BC = N_BC
         self.N_CP = N_CP
+        self.N_diff = N_diff
+        self.diffusion_coeff = diffusion_coeff
         self.epoch=epoch
         self.learning_rate= learning_rate
         np.random.seed(42)  # Set seed once
         
-    def pinn_data_generator(self, IC, BC, CP):
+    def pinn_data_generator_single(self, IC, BC, CP):
         
         if IC==True:
             data = pd.read_csv(self.data_path+'data_0000.csv')
@@ -133,16 +139,11 @@ class pinn_models():
             files = sorted([f for f in os.listdir(self.data_path) if f.startswith('data_') and f.endswith('.csv')])
             nt = len(files) - 1 #Ignoring the initial condition
             time_array = np.zeros((nt))
-            var_u_all = np.zeros((nt, self.resolution, 3))
             for i, file in enumerate(files[1:]):
                 data_all = pd.read_csv(os.path.join(self.data_path, file))
-                var_u = data_all.filter(like='u_t').values.flatten()
                 var_t = data_all["t"].iloc[0]
-                var_x = data_all["x"]
                 time_array[i] = var_t
-                var_u_all[i, :, 0] = var_u
-                var_u_all[i, :, 1] = var_t
-                var_u_all[i, :, 2] = var_x
+
             
             if BC == True:
                 idt = np.random.choice(len(time_array), size=self.N_BC, replace=False)
@@ -174,7 +175,7 @@ class pinn_models():
             else:
                 raise ValueError("Train Data type not specified")
 
-    def build_pinnmodel(self, n_hidden=4, n_neurons=50):
+    def build_pinnmodel_single(self, n_hidden=4, n_neurons=50):
         
         inputs = Input(shape=(2,), name = 'input_layer')
         x = inputs
@@ -185,7 +186,7 @@ class pinn_models():
         self.model_cont = mymodel
         return mymodel
     
-    def pde_residual(self, diff_const, X_tensor):
+    def pde_residual_single(self, diff_const, X_tensor):
 
         x_tf = X_tensor[:, 0:1]
         t_tf = X_tensor[:, 1:2]
@@ -203,34 +204,34 @@ class pinn_models():
         f = u_t - diff_const * u_xx
         return f
     
-    def loss_terms(self, diff_const):
+    def loss_terms_single(self, diff_const):
         
-        X_ic_input, u_ic = self.pinn_data_generator(IC=True, BC=False, CP=False)
+        X_ic_input, u_ic = self.pinn_data_generator_single(IC=True, BC=False, CP=False)
         u_ic_pred = self.model_cont (X_ic_input)
         loss_ic = tf.reduce_mean(tf.square(u_ic - u_ic_pred))
         
-        X_bc_input, u_bc = self.pinn_data_generator(IC=False, BC=True, CP=False)
+        X_bc_input, u_bc = self.pinn_data_generator_single(IC=False, BC=True, CP=False)
         u_bc_pred = self.model_cont (X_bc_input)
         loss_bc = tf.reduce_mean(tf.square(u_bc - u_bc_pred))
         
-        X_cp_input = self.pinn_data_generator(IC=False, BC=False, CP=True)
-        loss_pde = tf.reduce_mean(tf.square(self.pde_residual(diff_const, X_cp_input)))
+        X_cp_input = self.pinn_data_generator_single(IC=False, BC=False, CP=True)
+        loss_pde = tf.reduce_mean(tf.square(self.pde_residual_single(diff_const, X_cp_input)))
         
         loss = loss_ic + loss_bc + loss_pde
         return loss, loss_ic, loss_bc, loss_pde
     
-    def train_model(self, diff_const):
+    def train_model_single(self, diff_const):
         
         optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         for epoch in range(self.epoch):
             with tf.GradientTape() as tape:
-                loss, loss_ic, loss_bc, loss_pde = self.loss_terms(diff_const)
+                loss, loss_ic, loss_bc, loss_pde = self.loss_terms_single(diff_const)
             
             grads = tape.gradient(loss, self.model_cont.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.model_cont.trainable_variables))
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}: Total Loss = {loss.numpy():.4e} | IC = {loss_ic.numpy():.4e} | BC = {loss_bc.numpy():.4e} | PDE = {loss_pde.numpy():.4e}")
-        
+                
     def predict(self, x, t):        
         # Ensure x and t are column vectors
         x = np.reshape(x, (-1, 1))
@@ -246,25 +247,163 @@ class pinn_models():
         u_pred = self.model_cont(X_input)
         return u_pred
     
+class gen_pinn_model():
+    """
+    A class that defines  Physics-informed Neural Network models for learning PDE dynamics.
+
+    Attributes:
+        nx (int): Number of spatial grid points in the input profile.
+    """
+    def __init__(self, data_path, resolution, 
+                 N_IC, N_BC, N_CP, N_diff,
+                 diffusion_coeff,
+                 epoch=1000,
+                 learning_rate=1.e-3,
+                 print_loss=1,
+                 *args, **kwargs):
+        """
+        Initializes the model class with grid resolution.
+
+        Args:
+        """
+        self.data_path = data_path
+        self.resolution = resolution
+        self.N_IC = N_IC
+        self.N_BC = N_BC
+        self.N_CP = N_CP
+        self.N_diff = N_diff
+        self.diffusion_coeff = diffusion_coeff
+        self.epoch=epoch
+        self.learning_rate= learning_rate
+        self.print_loss = print_loss
+
+    ## All the functions for generalizing over the diffusion coefficients
+    
+    def build_pinnmodel(self, n_hidden=6, n_neurons=256):
+        
+        inputs = Input(shape=(3,), name = 'input_layer')
+        x = inputs
+        for i in range(n_hidden):
+            x = layers.Dense(n_neurons, activation='tanh', name=f'dense_{i+1}')(x)
+        output = layers.Dense(1, activation=None, name='output')(x)
+        mymodel = models.Model(inputs=inputs, outputs=output, name='PINN')
+        self.model_cont = mymodel
+        return mymodel
+    
+    def pde_residual(self, X_tensor):
+
+        x_tf = X_tensor[:, 0:1]
+        t_tf = X_tensor[:, 1:2]
+        diff_const = X_tensor[:, 2:3]
+        with tf.GradientTape(persistent=True) as tape2:
+            tape2.watch([x_tf, t_tf])
+            with tf.GradientTape(persistent=True) as tape1:
+                tape1.watch([x_tf, t_tf])
+                X_input = tf.concat([x_tf, t_tf, diff_const], axis=1)  # shape (N, 2)
+                u = self.model_cont(X_input)
+            u_x = tape1.gradient(u, x_tf)
+            u_t = tape1.gradient(u, t_tf)
+                
+        u_xx = tape2.gradient(u_x, x_tf)
+        
+        f = u_t - diff_const * u_xx
+        return f
+    
+    def loss_terms(self, X_ic_input, X_bc_input, u_ic, u_bc, X_cp_input):
+        
+        if rank ==0:
+            u_ic_pred = self.model_cont(X_ic_input)
+            u_bc_pred = self.model_cont(X_bc_input)
+
+            loss_ic = tf.reduce_mean(tf.square(u_ic - u_ic_pred))
+            loss_bc = tf.reduce_mean(tf.square(u_bc - u_bc_pred))
+            loss_pde = tf.reduce_mean(tf.square(self.pde_residual(X_cp_input)))
+            
+            loss = loss_ic + loss_bc + loss_pde
+            return loss, loss_ic, loss_bc, loss_pde
+        else:
+            return None, None, None, None
+    
+    def train_model(self):
+        
+        if (rank == 0) and (self.print_loss == 1):
+            log_file = open("training_log.txt", "w")
+            log_file.write("epoch,loss,loss_ic,loss_bc,loss_pde\n")
+        
+        optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
+        for epoch in range(self.epoch):
+            
+            data = pinn_gen_D(self.data_path, self.N_IC, 
+                        self.N_BC, self.N_CP, 
+                        self.N_diff,
+                        self.diffusion_coeff)
+            X_ic_input, u_ic = data.IC_data()
+            X_bc_input, u_bc = data.BC_data()
+            X_cp_input = data.CP_data()
+
+            comm.Barrier()
+            if rank == 0:
+                print(f"All processes passed the barrier, now tranning. Epoch{epoch}")
+                            
+                if X_ic_input is None or u_ic is None:
+                    raise ValueError("Initial condition data is None")
+                elif X_bc_input is None or u_bc is None:
+                    raise ValueError("Boundary condition data is None")
+                elif X_cp_input is None:
+                    raise ValueError("Collocation data is None")
+                
+                
+                with tf.GradientTape() as tape:
+                    loss, loss_ic, loss_bc, loss_pde = self.loss_terms(X_ic_input, X_bc_input, u_ic, u_bc, X_cp_input)
+                
+                grads = tape.gradient(loss, self.model_cont.trainable_variables)
+                optimizer.apply_gradients(zip(grads, self.model_cont.trainable_variables))
+                if epoch % 100 == 0:
+                    print(f"Epoch {epoch}: Total Loss = {loss.numpy():.4e} | IC = {loss_ic.numpy():.4e} | BC = {loss_bc.numpy():.4e} | PDE = {loss_pde.numpy():.4e}")
+                
+                if self.print_loss == 1:
+                    log_str = (
+                        f"{epoch},{loss.numpy():.6e},{loss_ic.numpy():.6e},"
+                        f"{loss_bc.numpy():.6e},{loss_pde.numpy():.6e}\n"
+                    )
+                    log_file.write(log_str)
+                
+        if (rank == 0) and (self.print_loss == 1):
+            log_file.close()
+        
+        
+    def predict(self, x, t, D):        
+        # Ensure x and t are column vectors
+        x = np.reshape(x, (-1, 1))
+        t = np.reshape(t, (-1, 1))
+        
+        if np.isscalar(D):
+            D = np.full_like(x, D)
+        D = np.reshape(D, (-1, 1))
+        # Convert to TensorFlow tensors
+        x_tf = tf.convert_to_tensor(x, dtype=tf.float32)
+        t_tf = tf.convert_to_tensor(t, dtype=tf.float32)
+        d_tf = tf.convert_to_tensor(D, dtype=tf.float32)
+
+        # Concatenate inputs
+        X_input = tf.concat([x_tf, t_tf, d_tf], axis=1)
+
+        # Make prediction
+        u_pred = self.model_cont(X_input)
+        return u_pred
+    
     def save_model(self, save_path):
         """
         Save the trained model weights to a given path.
         """
-        self.model_cont.save_weights(save_path)
-        print(f"Model weights saved to {save_path}")
+        if rank == 0:
+            self.model_cont.save_weights(save_path + "/pinn.weights.h5")
+            print(f"Model weights saved to {save_path}")
 
-    def load_model(self, model_architecture, load_path):
-        """
-        Load model weights into a given model architecture.
-
-        Args:
-            model_architecture: a model instance created by build_pinnmodel(...)
-            load_path: path to the saved weights
-        """
-        model_architecture.load_weights(load_path)
-        self.model_cont = model_architecture
+    def load_model(self, load_path):
+        self.model_cont = self.build_pinnmodel()
+        self.model_cont.load_weights(load_path)
         print(f"Model weights loaded from {load_path}")
-
 
 class Positional_Encoding():
     

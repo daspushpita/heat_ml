@@ -1,8 +1,14 @@
 import os, sys
 import numpy as np
 import pandas as pd
-
+import tensorflow as tf
+from tensorflow.keras import datasets, layers, models, Input, regularizers
+from mpi4py import MPI
     
+    
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
 class data_generator():
     """
     Reads 1D PDE solution snapshots from disk and returns X → Y training data,
@@ -86,4 +92,178 @@ class data_generator():
             return X_train, Y_train, X_test, Y_test, x_grid
         else:
             return X_train, Y_train, X_test, Y_test
+        
+class pinn_gen_D():
     
+    def __init__(self, datapath, N_IC, N_BC, N_CP, N_diff,
+                 diffusion_coeff):
+        
+        self.datapath = datapath
+        self.N_IC = N_IC
+        self.N_BC = N_BC
+        self.N_CP = N_CP
+        self.N_diff = N_diff
+        self.diffusion_coeff = diffusion_coeff
+        
+    def time_array(self, same_dt_allfiles):
+
+        if (same_dt_allfiles == True):
+            data_path = os.path.join(self.datapath,  f'diffusion0.01')
+            files = sorted([f for f in os.listdir(data_path) if f.startswith('data_') and f.endswith('.csv')])
+
+            nt = len(files) - 1 #Ignoring the initial condition
+            time_array = np.zeros((nt))
+
+            if nt <= 0:
+                raise ValueError(f"[Rank {rank}] No usable data files found in {data_path}. Files found: {files}")
+
+            for i, file in enumerate(files[1:]):
+                data_all = pd.read_csv(os.path.join(data_path, file))
+                time_array[i] = data_all["t"].iloc[0]
+            return time_array
+        else:
+            raise ValueError("data generation not implemented for tranning data with different dt")
+        
+    def IC_data(self):
+        
+        x_list, t_list, d_list, u_list = [], [], [], []
+        
+        if rank == 0:
+            id_D = np.random.choice(self.diffusion_coeff, size=self.N_diff, replace=False)
+        else:
+            id_D = None
+            
+        id_D_all = comm.bcast(id_D, root=0)
+        split_D = np.array_split(id_D_all, size)
+        my_D = split_D[rank]
+
+        if len(my_D) == 0:
+            return None, None
+        else:
+            for D_coeff in my_D:
+                data_path = os.path.join(self.datapath,  f'diffusion{D_coeff}')
+                data = pd.read_csv(os.path.join(data_path, 'data_0000.csv'))
+                
+                x = data['x']
+                u_xt = data['u_t0']
+                idx = np.random.choice(len(x), size=self.N_IC, replace=False)
+
+                x_ic = x[idx].to_numpy()
+                u_ic = u_xt[idx].to_numpy()
+                t_ic = np.zeros_like(x_ic)
+                d_ic = np.full_like(x_ic, D_coeff)
+
+                x_list.append(x_ic[:, None])
+                t_list.append(t_ic[:, None])
+                d_list.append(d_ic[:, None])
+                u_list.append(u_ic[:, None])
+
+            x_tf = tf.convert_to_tensor(np.concatenate(x_list), dtype=tf.float32)
+            t_tf = tf.convert_to_tensor(np.concatenate(t_list), dtype=tf.float32)
+            diff_tf = tf.convert_to_tensor(np.concatenate(d_list), dtype=tf.float32)
+            u_tf = tf.convert_to_tensor(np.concatenate(u_list), dtype=tf.float32)
+            X_local = tf.concat([x_tf, t_tf, diff_tf], axis=1)
+            u_local = u_tf
+            X_all = comm.gather(X_local, root=0)
+            u_all = comm.gather(u_local, root=0)
+            if rank == 0:
+                X_all = tf.concat(X_all, axis=0)
+                u_all = tf.concat(u_all, axis=0)
+                return X_all, u_all
+            else:
+                return None, None
+            
+    def BC_data(self):
+        
+        x_list, t_list, d_list, u_list = [], [], [], []
+
+        if rank == 0:
+            id_D = np.random.choice(self.diffusion_coeff, size=self.N_diff, replace=False)
+        else:
+            id_D = None
+            
+        id_D_all = comm.bcast(id_D, root=0)
+        D_split = np.array_split(id_D_all, size)
+        my_D = D_split[rank]
+
+        if len(my_D) == 0:
+            return None, None
+        else:
+            for D_coeff in my_D:
+                time_array = self.time_array(same_dt_allfiles=True)
+                n_available = len(time_array)
+                if self.N_BC > n_available:
+                    raise ValueError(f"Cannot sample {self.N_BC} unique times from only {n_available} available.")
+                
+                idt = np.random.choice(len(time_array), size=self.N_BC, replace=False)
+                t = time_array[idt]
+
+                # Repeat x=0 and x=1 for each sampled time
+                x = np.tile([0.0, 1.0], self.N_BC)  # shape (2*N_BC,)
+                t = np.repeat(t, 2)             # shape (2*N_BC,)
+                u = np.zeros_like(x)            # (e.g., Dirichlet BC: u=0 at both ends)
+                diff = np.full_like(x, D_coeff)
+                
+                x_list.append(x[:, None]) #[:,None] -> makes the shape (2*N_BC,) -> (2*N_BC, 1)
+                t_list.append(t[:, None])
+                d_list.append(diff[:, None])
+                u_list.append(u[:, None])
+                
+            # Convert to tensors
+            x_tf_bc = tf.convert_to_tensor(np.concatenate(x_list), dtype=tf.float32)
+            t_tf_bc = tf.convert_to_tensor(np.concatenate(t_list), dtype=tf.float32)
+            u_tf_bc = tf.convert_to_tensor(np.concatenate(u_list), dtype=tf.float32)
+            diff_tf_bc = tf.convert_to_tensor(np.concatenate(d_list), dtype=tf.float32)
+
+            X_local = tf.concat([x_tf_bc, t_tf_bc, diff_tf_bc], axis=1)
+            u_local = u_tf_bc
+            X_all = comm.gather(X_local, root=0)
+            u_all = comm.gather(u_local, root=0)
+            if rank == 0:
+                X_all = tf.concat(X_all, axis=0)
+                u_all = tf.concat(u_all, axis=0)
+                return X_all, u_all
+            else:
+                return None, None
+            
+            
+    def CP_data(self):
+
+        x_list, t_list, d_list = [], [], []
+        if rank == 0:
+            id_D = np.random.choice(self.diffusion_coeff, size=self.N_diff, replace=False)
+        else:
+            id_D = None
+            
+        id_D_all = comm.bcast(id_D, root=0)
+        D_split = np.array_split(id_D_all, size)
+        my_D = D_split[rank]
+
+        if len(my_D) == 0:
+            return None, None
+        else:        
+            for D_coeff in my_D:
+                time_array = self.time_array(same_dt_allfiles=True)
+                n_available = len(time_array)
+                if self.N_CP > n_available:
+                    raise ValueError(f"Cannot sample {self.N_CP} unique times from only {n_available} available.")
+            
+                x_cp = np.random.uniform(0.0, 1.0, size=self.N_CP)
+                t_cp = np.random.uniform(np.min(time_array), np.max(time_array), size=self.N_CP)
+                diff_cp = np.full_like(x_cp, D_coeff)
+                
+                x_list.append(x_cp[:, None])
+                t_list.append(t_cp[:, None])
+                d_list.append(diff_cp[:, None])
+
+            # Convert to tensors
+            x_tf_cp = tf.convert_to_tensor(np.concatenate(x_list), dtype=tf.float32)
+            t_tf_cp = tf.convert_to_tensor(np.concatenate(t_list), dtype=tf.float32)
+            diff_tf_cp = tf.convert_to_tensor(np.concatenate(d_list), dtype=tf.float32)
+            X_local = tf.concat([x_tf_cp, t_tf_cp, diff_tf_cp], axis=1)
+            X_all = comm.gather(X_local, root=0)
+            if rank == 0:
+                X_all = tf.concat(X_all, axis=0)
+                return X_all
+            else:
+                return None, None
