@@ -22,7 +22,7 @@ os.makedirs(png_dir, exist_ok=True)
 
 # === Trained diffusion coefficients ===
 D_train = np.array([0.01, 0.03, 0.07, 0.09, 0.1, 0.2])
-D_test = 0.05  # Diffusion value to test
+D_test = 0.08  # Diffusion value to test
 
 # === Utility: Get time array and x grid ===
 def get_time_and_x(data_path):
@@ -65,6 +65,20 @@ u_preds = model.predict(x_vals, t_vals, D=D_test).numpy()
 
 # === Load true data for comparison (optional) ===
 u_true_all, time_array = load_true_solutions(data_path)
+
+# === Build predictions for all timesteps ===
+u_preds_all = []
+for i, t_val in enumerate(t_vals):
+    t_input = np.full_like(x_vals, t_val)  # repeat same t for each x
+    u_pred = model.predict(x_vals, t_input, D=D_test).numpy().flatten()
+    u_preds_all.append(u_pred)
+
+u_preds_all = np.array(u_preds_all)  # shape (nt, nx)
+u_true_all = np.array(u_true_all)    # already loaded above
+
+# === Compute relative L2 error ===
+l2_error = np.linalg.norm(u_preds_all - u_true_all) / np.linalg.norm(u_true_all)
+print(f"Relative L2 error: {l2_error:.6f}")
 
 # === Setup figure ===
 fig, ax = plt.subplots(figsize=(6, 4))

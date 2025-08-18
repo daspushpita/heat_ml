@@ -4,10 +4,58 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import datasets, layers, models, Input, regularizers
 from data_generator import pinn_gen_D
+from data_generator import data_generator_simple_nn
 from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
+
+
+class neural_net():
+    
+    def __init__(self, n_layers, n_units, 
+                 activation, nx, 
+                 dim, K, 
+                 reshape_output=True,
+                 dropout=False,
+                 dropout_param=0.5,
+                 *args, **kwargs):
+        
+        self.n_layers = n_layers
+        self.n_units = n_units
+        self.activation = activation
+        self.nx = nx
+        self.dim = dim      #1 for u channel, 2 for u and x, 3 for u, x, and t
+        self.K = K
+        self.reshape_output = reshape_output
+        self.dropout = dropout
+        self.dropout_param = dropout_param
+        
+    def simple_nn_multistep(self):
+        
+        input_layer = Input(shape=(self.nx, self.dim), name='input_layer')
+        x = layers.Flatten(name='flatten')(input_layer)                 # (batch, nx*dim)
+        
+        for i in range(self.n_layers):
+            x = layers.Dense(units=self.n_units, 
+                             activation=self.activation, 
+                             kernel_initializer='he_normal',
+                             kernel_regularizer=regularizers.l2(1e-6),
+                             name=f'layer{i+1}')(x)
+            if self.dropout == True:
+                x = layers.Dropout(self.dropout_param, name=f'dropout{i+1}')(x)
+                
+        x = layers.Dense(units=self.nx * self.K, activation='linear', name='dense_output')(x)
+        
+        if self.reshape_output:
+            # Reshape to (nx, K, 1): space × horizon × channel
+            output_layer = layers.Reshape((self.nx, self.K, 1), name='output_layer')(x)
+        else:
+            output_layer = (x)
+        # Define the model
+        mymodel = models.Model(inputs=input_layer, outputs=output_layer, name='simple_neuralnet_model')
+        self.model = mymodel
+        return mymodel
 
 class cnn_models():
     """
@@ -117,65 +165,8 @@ class single_pinn_model():
         self.epoch=epoch
         self.learning_rate= learning_rate
         np.random.seed(42)  # Set seed once
-        
-    def pinn_data_generator_single(self, IC, BC, CP):
-        
-        if IC==True:
-            data = pd.read_csv(self.data_path+'data_0000.csv')
-            x = data['x']
-            u_xt = data['u_t0']
-            idx = np.random.choice(len(x), size=self.N_IC, replace=False)
-            x_ic = x[idx]
-            t_ic = np.zeros_like(x_ic)
-            u_xt_ic = u_xt[idx]
-            x_tf_ic = tf.convert_to_tensor(x_ic, dtype=tf.float32)
-            t_tf_ic = tf.convert_to_tensor(t_ic, dtype=tf.float32)
-            u_tf_ic = tf.convert_to_tensor(u_xt_ic.to_numpy()[:, None], dtype=tf.float32)
-            # X_input = tf.concat([x_tf_ic, t_tf_ic], axis=1)
-            X_input = tf.concat([x_tf_ic[:, None], t_tf_ic[:, None]], axis=1)
-            return X_input, u_tf_ic
-        
-        else:
-            files = sorted([f for f in os.listdir(self.data_path) if f.startswith('data_') and f.endswith('.csv')])
-            nt = len(files) - 1 #Ignoring the initial condition
-            time_array = np.zeros((nt))
-            for i, file in enumerate(files[1:]):
-                data_all = pd.read_csv(os.path.join(self.data_path, file))
-                var_t = data_all["t"].iloc[0]
-                time_array[i] = var_t
 
-            
-            if BC == True:
-                idt = np.random.choice(len(time_array), size=self.N_BC, replace=False)
-                t_bc = time_array[idt]
-
-                # Repeat x=0 and x=1 for each sampled time
-                x_bc = np.tile([0.0, 1.0], self.N_BC)  # shape (2*N_BC,)
-                t_bc = np.repeat(t_bc, 2)             # shape (2*N_BC,)
-                u_bc = np.zeros_like(x_bc)            # (e.g., Dirichlet BC: u=0 at both ends)
-
-                # Convert to tensors
-                x_tf_bc = tf.convert_to_tensor(x_bc[:, None], dtype=tf.float32)
-                t_tf_bc = tf.convert_to_tensor(t_bc[:, None], dtype=tf.float32)
-                u_tf_bc = tf.convert_to_tensor(u_bc[:, None], dtype=tf.float32)
-                X_input = tf.concat([x_tf_bc, t_tf_bc], axis=1)
-                return X_input, u_tf_bc
-            
-            elif CP == True:
-                x_cp = np.random.uniform(0.0, 1.0, size=self.N_CP)
-                t_cp = np.random.uniform(np.min(time_array), np.max(time_array), size=self.N_CP)
-
-                # Convert to tensors
-                x_tf_cp = tf.convert_to_tensor(x_cp[:, None], dtype=tf.float32)
-                t_tf_cp = tf.convert_to_tensor(t_cp[:, None], dtype=tf.float32)
-
-                X_input = tf.concat([x_tf_cp, t_tf_cp], axis=1)
-                return X_input
-            
-            else:
-                raise ValueError("Train Data type not specified")
-
-    def build_pinnmodel_single(self, n_hidden=4, n_neurons=50):
+    def build_pinnmodel_D(self, n_hidden=4, n_neurons=50):
         
         inputs = Input(shape=(2,), name = 'input_layer')
         x = inputs
@@ -186,7 +177,7 @@ class single_pinn_model():
         self.model_cont = mymodel
         return mymodel
     
-    def pde_residual_single(self, diff_const, X_tensor):
+    def pde_residual_D(self, diff_const, X_tensor):
 
         x_tf = X_tensor[:, 0:1]
         t_tf = X_tensor[:, 1:2]
@@ -204,35 +195,35 @@ class single_pinn_model():
         f = u_t - diff_const * u_xx
         return f
     
-    def loss_terms_single(self, diff_const):
+    def loss_terms_D(self, diff_const):
         
-        X_ic_input, u_ic = self.pinn_data_generator_single(IC=True, BC=False, CP=False)
+        X_ic_input, u_ic = self.pinn_data_generator_D(IC=True, BC=False, CP=False)
         u_ic_pred = self.model_cont (X_ic_input)
         loss_ic = tf.reduce_mean(tf.square(u_ic - u_ic_pred))
         
-        X_bc_input, u_bc = self.pinn_data_generator_single(IC=False, BC=True, CP=False)
+        X_bc_input, u_bc = self.pinn_data_generator_D(IC=False, BC=True, CP=False)
         u_bc_pred = self.model_cont (X_bc_input)
         loss_bc = tf.reduce_mean(tf.square(u_bc - u_bc_pred))
         
-        X_cp_input = self.pinn_data_generator_single(IC=False, BC=False, CP=True)
-        loss_pde = tf.reduce_mean(tf.square(self.pde_residual_single(diff_const, X_cp_input)))
+        X_cp_input = self.pinn_data_generator_D(IC=False, BC=False, CP=True)
+        loss_pde = tf.reduce_mean(tf.square(self.pde_residual_D(diff_const, X_cp_input)))
         
         loss = loss_ic + loss_bc + loss_pde
         return loss, loss_ic, loss_bc, loss_pde
     
-    def train_model_single(self, diff_const):
+    def train_model_D(self, diff_const):
         
         optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         for epoch in range(self.epoch):
             with tf.GradientTape() as tape:
-                loss, loss_ic, loss_bc, loss_pde = self.loss_terms_single(diff_const)
+                loss, loss_ic, loss_bc, loss_pde = self.loss_terms_D(diff_const)
             
             grads = tape.gradient(loss, self.model_cont.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.model_cont.trainable_variables))
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}: Total Loss = {loss.numpy():.4e} | IC = {loss_ic.numpy():.4e} | BC = {loss_bc.numpy():.4e} | PDE = {loss_pde.numpy():.4e}")
                 
-    def predict(self, x, t):        
+    def predict_D(self, x, t):        
         # Ensure x and t are column vectors
         x = np.reshape(x, (-1, 1))
         t = np.reshape(t, (-1, 1))
@@ -246,6 +237,19 @@ class single_pinn_model():
         # Make prediction
         u_pred = self.model_cont(X_input)
         return u_pred
+    
+    def save_model(self, save_path):
+        """
+        Save the trained model weights to a given path.
+        """
+        if rank == 0:
+            self.model_cont.save_weights(save_path + "/pinn.weights.h5")
+            print(f"Model weights saved to {save_path}")
+
+    def load_model(self, load_path):
+        self.model_cont = self.build_pinnmodel()
+        self.model_cont.load_weights(load_path)
+        print(f"Model weights loaded from {load_path}")
     
 class gen_pinn_model():
     """

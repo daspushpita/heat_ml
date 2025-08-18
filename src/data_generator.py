@@ -9,7 +9,99 @@ from mpi4py import MPI
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
-class data_generator():
+
+
+class data_generator_simple_nn():
+    """
+    Reads 1D PDE solution snapshots from disk and returns X → Y training data,
+    optionally skipping time steps and holding out test data.
+    """
+    def __init__(self, path, holdout, nsteps, dim, csv=1, npz=0, x_res=100, gen=0, skip=0, *args, **kwargs):
+        
+        self.filename = path
+        self.dim = dim
+        self.csv = csv
+        self.npz = npz
+        self.nx = x_res
+        self.gen = gen
+        self.holdout = holdout
+        self.skip = skip
+        self.nsteps = nsteps
+
+    def read_1d(self):
+        
+        if (self.csv):
+            files = sorted([f for f in os.listdir(self.filename) if f.startswith('data_') and f.endswith('.csv')])
+            files = files if self.skip==0 else files[::self.skip]
+            x_shape = self.nx
+            
+            data_0 = pd.read_csv(os.path.join(self.filename, files[0]))
+            self.x = data_0["x"].values.astype(np.float32)
+            
+            nt = len(files)
+            u_all = np.zeros((nt, self.nx), dtype=np.float32)
+            t_all = np.zeros((nt,), dtype=np.float32)
+
+            for i, file in enumerate(files):
+                data = pd.read_csv(os.path.join(self.filename, file))
+                u_all[i] = data.filter(like='u_t').values.flatten()
+                t_all[i] = data["t"].iloc[0]
+                                
+        elif (self.npz):
+            data = np.load(self.path)
+            u_all = data['u'].astype(np.float32)       # (nt, nx)
+            t_all = data['time'].astype(np.float32)    # (nt,)
+            self.x= data['x'].astype(np.float32)       # (nx,)
+
+            u_all = u_all[::self.skip]
+            t_all = t_all[::self.skip]
+        
+        else:
+            raise ValueError ("No datafile format specified!")
+        
+        nt = u_all.shape[0]
+        k  = int(self.nsteps)
+        num_samples = nt - k
+        
+        # X: (samples, nx, 3) = [u(x,t_n), x, t_n]        
+        X_data = np.zeros((num_samples, self.nx, self.dim), dtype=np.float32)
+        if self.dim==1:
+            X_data[..., 0] = u_all[:num_samples]
+        elif self.dim==2:
+            X_data[..., 0] = u_all[:num_samples]          # u(x,t_n)
+            X_data[..., 1] = self.x[None, :]              # x
+        elif self.dim==3:
+            X_data[..., 0] = u_all[:num_samples]          # u(x,t_n)
+            X_data[..., 1] = self.x[None, :]              # x
+            X_data[..., 2] = t_all[:num_samples, None]    # t_n (broadcasted across x)
+        else:
+            raise ValueError('Dimensions not understood for u(x, t)')
+            
+        if X_data.shape[-1] != self.dim:
+            raise RuntimeError(f"Feature dim mismatch: got {X_data.shape[-1]}, expected {self.dim}")
+
+        # Build multi-step Y
+        # Y: (samples, nx, k, 1) = [u(x,t_{n+1}), ..., u(x,t_{n+k})]
+        # stack along horizon, transpose to put nx before k, then add channel dim
+        Y = np.stack([u_all[i+1:i+1+k] for i in range(num_samples)], axis=0)  # (samples, k, nx)
+        Y = np.transpose(Y, (0, 2, 1))[..., None]                              # (samples, nx, k, 1)
+        
+        # Split training vs held-out
+        if self.holdout > 0:
+            if self.holdout >= num_samples:
+                raise ValueError(f"holdout ({self.holdout}) must be < samples ({num_samples}).")
+            X_train, Y_train = X_data[:-self.holdout], Y[:-self.holdout]
+            X_test, Y_test = X_data[-self.holdout:], Y[-self.holdout:]
+        else:
+            X_train, Y_train = X_data, Y
+            X_test, Y_test = None, None 
+        
+        if self.gen:
+            return X_train, Y_train, X_test, Y_test, self.x, t_all
+        else:
+            return X_train, Y_train, X_test, Y_test
+
+class data_generator_cnn():
     """
     Reads 1D PDE solution snapshots from disk and returns X → Y training data,
     optionally skipping time steps and holding out test data.
@@ -93,6 +185,83 @@ class data_generator():
         else:
             return X_train, Y_train, X_test, Y_test
         
+class pinn_single_D():
+        
+    def __init__(self, datapath, N_IC, N_BC, N_CP, N_diff,
+                 diffusion_coeff):
+        
+        self.datapath = datapath
+        self.N_IC = N_IC
+        self.N_BC = N_BC
+        self.N_CP = N_CP
+        self.N_diff = N_diff
+        self.diffusion_coeff = diffusion_coeff
+        
+    def time_array(self, same_dt_allfiles):
+
+        if (same_dt_allfiles == True):
+            data_path = os.path.join(self.datapath, f'diffusion{self.diffusion_coeff:.2f}')
+            files = sorted([f for f in os.listdir(data_path) if f.startswith('data_') and f.endswith('.csv')])
+
+            nt = len(files) - 1 #Ignoring the initial condition
+            time_array = np.zeros((nt))
+
+            if nt <= 0:
+                raise ValueError(f"[Rank {rank}] No usable data files found in {data_path}. Files found: {files}")
+
+            for i, file in enumerate(files[1:]):
+                data_all = pd.read_csv(os.path.join(data_path, file))
+                time_array[i] = data_all["t"].iloc[0]
+            return time_array
+        else:
+            raise ValueError("data generation not implemented for tranning data with different dt")
+        
+        
+    def IC_data(self):
+        data = pd.read_csv(self.datapath+'data_0000.csv')
+        x = data['x']
+        u_xt = data['u_t0']
+        idx = np.random.choice(len(x), size=self.N_IC, replace=False)
+        x_ic = x[idx]
+        t_ic = np.zeros_like(x_ic)
+        u_xt_ic = u_xt[idx]
+        x_tf_ic = tf.convert_to_tensor(x_ic, dtype=tf.float32)
+        t_tf_ic = tf.convert_to_tensor(t_ic, dtype=tf.float32)
+        u_tf_ic = tf.convert_to_tensor(u_xt_ic.to_numpy()[:, None], dtype=tf.float32)
+        X_input = tf.concat([x_tf_ic[:, None], t_tf_ic[:, None]], axis=1)
+        return X_input, u_tf_ic
+        
+    def BC_data(self):
+        time = self.time_array(same_dt_allfiles=True)
+        idt = np.random.choice(len(time), size=self.N_BC, replace=False)
+        t_bc = time[idt]
+
+        # Repeat x=0 and x=1 for each sampled time
+        x_bc = np.tile([0.0, 1.0], self.N_BC)  # shape (2*N_BC,)
+        t_bc = np.repeat(t_bc, 2)             # shape (2*N_BC,)
+        u_bc = np.zeros_like(x_bc)            # (e.g., Dirichlet BC: u=0 at both ends)
+
+        # Convert to tensors
+        x_tf_bc = tf.convert_to_tensor(x_bc[:, None], dtype=tf.float32)
+        t_tf_bc = tf.convert_to_tensor(t_bc[:, None], dtype=tf.float32)
+        u_tf_bc = tf.convert_to_tensor(u_bc[:, None], dtype=tf.float32)
+        X_input = tf.concat([x_tf_bc, t_tf_bc], axis=1)
+        return X_input, u_tf_bc
+            
+    def CP_data(self):
+        
+        time = self.time_array(same_dt_allfiles=True)
+        x_cp = np.random.uniform(0.0, 1.0, size=self.N_CP)
+        t_cp = np.random.uniform(np.min(time), np.max(time), size=self.N_CP)
+
+        # Convert to tensors
+        x_tf_cp = tf.convert_to_tensor(x_cp[:, None], dtype=tf.float32)
+        t_tf_cp = tf.convert_to_tensor(t_cp[:, None], dtype=tf.float32)
+
+        X_input = tf.concat([x_tf_cp, t_tf_cp], axis=1)
+        return X_input
+
+
 class pinn_gen_D():
     
     def __init__(self, datapath, N_IC, N_BC, N_CP, N_diff,
