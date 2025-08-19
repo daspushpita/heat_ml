@@ -65,7 +65,11 @@ class cnn_models():
     Attributes:
         nx (int): Number of spatial grid points in the input profile.
     """
-    def __init__(self, nx, dim, *args, **kwargs):
+    def __init__(self, nx, dim,
+                n_channels, kernel_size,
+                n_layer, K,
+                activation='relu',
+                 *args, **kwargs):
         """
         Initializes the model class with grid resolution.
 
@@ -74,26 +78,14 @@ class cnn_models():
         """
         self.nx = nx
         self.dim = dim
+        self.n_channels = n_channels
+        self.kernel_size = kernel_size
+        self.n_layers = n_layer
+        self.K = K
+        self.activation = activation
         
-    def cnn_model_1d_single_diff(self, K):
-        """
-        Builds a 1D CNN model that maps an input field u(x)^n to the next time step u(x)^{n+1}.
-        The model preserves spatial structure using only convolutional layers.
 
-        Returns:
-            model_cnn (tf.keras.Model): Compiled 1D CNN model ready for training.
-        """
-        # Input shape: (nx, 1) — scalar value at each grid point
-        inputs = Input(shape=(self.nx,1), name = 'input_layer')
-        x = layers.Conv1D(6, kernel_size=3, padding='same', activation='relu', name='conv_l1')(inputs)
-        x = layers.Conv1D(6, kernel_size=3, padding='same', activation='relu',name='conv_l2')(x)
-        if K > 1:
-            x = layers.Conv1D(6, kernel_size=3, padding='same', activation='relu',name='conv_l3')(x)
-        output = layers.Conv1D(K, kernel_size=1, padding='same', name='output')(x)
-        model_cnn = models.Model(inputs=inputs, outputs=output)
-        return model_cnn
-    
-    def cnn_model_1d_multistep_diff(self, K):
+    def cnn_model_1d_single_diff(self):
         """
         Builds a 1D CNN model that maps an input field u(x)^n to multiple next time steps u(x)^{n+1}, u(x)^{n+2}, u(x)^{n+3}.
         The model preserves spatial structure using only convolutional layers.
@@ -103,15 +95,21 @@ class cnn_models():
         """
         # Input shape: (nx, 1) — scalar value at each grid point
         inputs = Input(shape=(self.nx, self.dim), name = 'input_layer')
-        x = layers.Conv1D(9, kernel_size=3, padding='same', activation='relu', name='conv_l1')(inputs)
-        x = layers.Conv1D(9, kernel_size=3, padding='same', activation='relu',name='conv_l2')(x)
-        if K > 1:
-            x = layers.Conv1D(6, kernel_size=3, padding='same', activation='relu',name='conv_l3')(x)
-            
-        x = layers.TimeDistributed(layers.Dense(136, activation='relu'), name='neural')(x)
-        output = layers.Conv1D(K, kernel_size=1, padding='same', name='output')(x)
-        model_cnn = models.Model(inputs=inputs, outputs=output)
-        return model_cnn
+        for i in range(self.n_layers):
+            if i == 0:
+                x = layers.Conv1D(self.n_channels, kernel_size=self.kernel_size, padding="same", 
+                            activation=self.activation, name=f'conv_l{i}')(inputs)
+            else:
+                x = layers.Conv1D(self.n_channels, kernel_size=self.kernel_size, padding="same", 
+                            activation=self.activation, name=f'conv_l{i}')(x)
+                
+        x = layers.Conv1D(64, kernel_size=1, padding="same", activation=self.activation, name='mixer_1x1')(x)
+
+        output = layers.Conv1D(self.K, kernel_size=1, padding="same", name='output')(x)
+        mymodel = models.Model(inputs=inputs, outputs=output)
+        self.model_cont = mymodel
+        
+        return mymodel
 
     def cnn_model_1d_gen_diff(self):
         """

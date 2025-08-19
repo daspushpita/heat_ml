@@ -11,12 +11,30 @@ rank = comm.Get_rank()
 size = comm.Get_size()
 
 
+class Positional_Encoding():
+    
+    def __init__(self, x, d_model, n_user=10000, *args, **kwargs):
+        self.x = x
+        self.d_model = d_model
+        self.n_user = n_user
+    
+    def sinosoidal_encoding(self):
+        nk = len(self.x)
+        n_freq = self.d_model//2
+        pe_matrix = np.zeros((nk, self.d_model))
+        for i in range(n_freq):
+            theta = self.x / (self.n_user ** (2 * i / self.d_model))
+            pe_matrix[:, 2*i] = np.sin(theta)
+            pe_matrix[:, 2*i+1] = np.cos(theta)
+        return pe_matrix
+    
 class data_generator_simple_nn():
     """
     Reads 1D PDE solution snapshots from disk and returns X → Y training data,
     optionally skipping time steps and holding out test data.
     """
-    def __init__(self, path, holdout, nsteps, dim, csv=1, npz=0, x_res=100, gen=0, skip=0, *args, **kwargs):
+    def __init__(self, path, holdout, nsteps, dim, csv=1, npz=0, 
+                 x_res=100, gen=0, skip=0, pos=0, *args, **kwargs):
         
         self.filename = path
         self.dim = dim
@@ -27,12 +45,15 @@ class data_generator_simple_nn():
         self.holdout = holdout
         self.skip = skip
         self.nsteps = nsteps
+        self.pos = pos
 
     def read_1d(self):
         
         if (self.csv):
-            files = sorted([f for f in os.listdir(self.filename) if f.startswith('data_') and f.endswith('.csv')])
-            files = files if self.skip==0 else files[::self.skip]
+            files = sorted(
+                [f for f in os.listdir(self.filename) if f.startswith('data_') and f.endswith('.csv')],
+                key=lambda s: int(s.split('_')[1].split('.')[0])
+            )
             x_shape = self.nx
             
             data_0 = pd.read_csv(os.path.join(self.filename, files[0]))
@@ -63,28 +84,53 @@ class data_generator_simple_nn():
         k  = int(self.nsteps)
         num_samples = nt - k
         
-        # X: (samples, nx, 3) = [u(x,t_n), x, t_n]        
-        X_data = np.zeros((num_samples, self.nx, self.dim), dtype=np.float32)
-        if self.dim==1:
-            X_data[..., 0] = u_all[:num_samples]
-        elif self.dim==2:
-            X_data[..., 0] = u_all[:num_samples]          # u(x,t_n)
-            X_data[..., 1] = self.x[None, :]              # x
-        elif self.dim==3:
-            X_data[..., 0] = u_all[:num_samples]          # u(x,t_n)
-            X_data[..., 1] = self.x[None, :]              # x
-            X_data[..., 2] = t_all[:num_samples, None]    # t_n (broadcasted across x)
-        else:
-            raise ValueError('Dimensions not understood for u(x, t)')
-            
-        if X_data.shape[-1] != self.dim:
-            raise RuntimeError(f"Feature dim mismatch: got {X_data.shape[-1]}, expected {self.dim}")
+        if self.pos==0:
+            # X: (samples, nx, 3) = [u(x,t_n), x, t_n]        
+            X_data = np.zeros((num_samples, self.nx, self.dim), dtype=np.float32)
+            if self.dim==1:
+                X_data[..., 0] = u_all[:num_samples]
+            elif self.dim==2:
+                X_data[..., 0] = u_all[:num_samples]          # u(x,t_n)
+                X_data[..., 1] = self.x[None, :]              # x
+            elif self.dim==3:
+                X_data[..., 0] = u_all[:num_samples]          # u(x,t_n)
+                X_data[..., 1] = self.x[None, :]              # x
+                X_data[..., 2] = t_all[:num_samples, None]    # t_n (broadcasted across x)
+            else:
+                raise ValueError('Dimensions not understood for u(x, t)')
+                
+            if X_data.shape[-1] != self.dim:
+                raise RuntimeError(f"Feature dim mismatch: got {X_data.shape[-1]}, expected {self.dim}")
 
-        # Build multi-step Y
-        # Y: (samples, nx, k, 1) = [u(x,t_{n+1}), ..., u(x,t_{n+k})]
-        # stack along horizon, transpose to put nx before k, then add channel dim
-        Y = np.stack([u_all[i+1:i+1+k] for i in range(num_samples)], axis=0)  # (samples, k, nx)
-        Y = np.transpose(Y, (0, 2, 1))[..., None]                              # (samples, nx, k, 1)
+            # Build multi-step Y
+            # Y: (samples, nx, k, 1) = [u(x,t_{n+1}), ..., u(x,t_{n+k})]
+            # stack along horizon, transpose to put nx before k, then add channel dim
+            Y = np.stack([u_all[i+1:i+1+k] for i in range(num_samples)], axis=0)  # (samples, k, nx)
+            Y = np.transpose(Y, (0, 2, 1))[..., None]                              # (samples, nx, k, 1)
+
+        elif self.pos==1:
+            # X: (samples, nx, 3) = [u(x,t_n), x, t_n]        
+            X_data = np.zeros((num_samples, self.nx, self.dim))
+            x_min, x_max = self.x.min(), self.x.max()
+            x_norm = (self.x - x_min) / (x_max - x_min + 1e-12)
+            
+            if self.dim==1:
+                d_model = 1
+                X_data[..., 0] = u_all[:num_samples]
+                pos_enc = Positional_Encoding(x_norm, d_model=d_model).sinosoidal_encoding()
+                pe_all = np.broadcast_to(pos_enc, (num_samples, self.nx, d_model))
+                X_data = np.concatenate((X_data, pe_all), axis=-1)
+                self.dim = 1 + d_model
+                
+                # Build multi-step Y: (samples, nx, k)
+                Y = np.stack([u_all[i+1:i+1+k] for i in range(num_samples)], axis=0)  # (samples, k, nx)
+                Y = np.transpose(Y, (0, 2, 1))                                      # (samples, nx, k)
+    
+            else:
+                raise ValueError('Dimensions not understood for u(x, t) with positional encoding')
+            
+        else:
+            raise ValueError('positional encoding flag not understood')
         
         # Split training vs held-out
         if self.holdout > 0:
@@ -99,91 +145,8 @@ class data_generator_simple_nn():
         if self.gen:
             return X_train, Y_train, X_test, Y_test, self.x, t_all
         else:
-            return X_train, Y_train, X_test, Y_test
+            return X_train, Y_train, X_test, Y_test, self.x, t_all
 
-class data_generator_cnn():
-    """
-    Reads 1D PDE solution snapshots from disk and returns X → Y training data,
-    optionally skipping time steps and holding out test data.
-    """
-    def __init__(self, path, holdout, nsteps, dim, csv=1, npz=0, x_res=100, gen=0, skip=0, *args, **kwargs):
-        
-        self.filename = path
-        self.dim = dim
-        self.csv = csv
-        self.npz = npz
-        self.nx = x_res
-        self.gen = gen
-        self.holdout = holdout
-        self.skip = skip
-        self.nsteps = nsteps
-
-    def read_1d(self):
-        
-        if (self.dim != 1):
-            raise ValueError ("1D read function called for Dimensions > 1")
-        
-        if (self.csv):
-            files = sorted([f for f in os.listdir(self.filename) if f.startswith('data_') and f.endswith('.csv')])
-            files = files if self.skip==0 else files[::self.skip]
-            x_shape = self.nx
-            data = pd.read_csv(os.path.join(self.filename, files[0]))
-            self.x = data["x"].values
-            nt = len(files)
-            var_u_all = np.zeros((nt, x_shape, 3))
-            for i, file in enumerate(files):
-                data = pd.read_csv(os.path.join(self.filename, file))
-                var_u = data.filter(like='u_t').values.flatten()
-                var_x = data["x"]
-                var_t = data["t"].iloc[0]
-
-                var_u_all[i, :, 0] = var_u
-                var_u_all[i, :, 1] = var_t
-                var_u_all[i, :, 2] = var_x
-                                
-        elif (self.npz):
-            data = np.load(self.filename)
-            var_u = data['u'][:-1]
-            var_t = data['time'][:-1]
-            var_x = data['x']
-            nt = len(var_t)
-            x_shape = self.nx
-            var_u_all = np.zeros((nt, x_shape, 3))
-
-            var_u_all[:, :, 0] = var_u
-            var_u_all[:, :, 1] = var_t            
-            var_u_all[:, :, 2] = var_x
-        
-        else:
-            raise ValueError ("No datafile format specified!")
-            
-            
-        X = var_u_all[:-(self.nsteps), :, :]  # shape: (nt - nsteps, nx)
-
-        # Build multi-step Y
-        Y = np.stack([var_u_all[i+1:i+1+self.nsteps, :, 0]  # shape: (nsteps, nx)
-            for i in range(nt - self.nsteps)])
-        Y = np.transpose(Y, (0, 2, 1))  # shape: (samples, nx, nsteps)
-        
-        # Split training vs held-out
-        if self.holdout > 0:
-            X_train = X[:-self.holdout]
-            Y_train = Y[:-self.holdout]
-            X_test = X[-self.holdout:]
-            Y_test = Y[-self.holdout:]
-        else:
-            X_train, Y_train = X, Y
-            X_test, Y_test = None, None  # or np.empty(...)
-        
-        # column_names = [f"u{i}" for i  in range(self.nx)]
-        # X_train_df = pd.DataFrame(X_train, columns=column_names)
-        # Y_train_df = pd.DataFrame(Y_train, columns=column_names)
-        
-        if self.gen:
-            x_grid = self.x
-            return X_train, Y_train, X_test, Y_test, x_grid
-        else:
-            return X_train, Y_train, X_test, Y_test
         
 class pinn_single_D():
         
