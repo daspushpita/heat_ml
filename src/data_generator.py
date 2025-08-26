@@ -118,7 +118,7 @@ class data_generator_simple_nn():
             x_norm = (self.x - x_min) / (x_max - x_min + 1e-12)
             
             if self.dim==1:
-                d_model = 1
+                d_model = 2
                 X_data[..., 0] = u_all[:num_samples]
                 pos_enc = Positional_Encoding(x_norm, d_model=d_model).sinosoidal_encoding()
                 pe_all = np.broadcast_to(pos_enc, (num_samples, self.nx, d_model))
