@@ -107,7 +107,7 @@ class cnn_models():
                 x = layers.Conv1D(self.n_channels, kernel_size=self.kernel_size, padding="same", 
                             activation=self.activation, name=f'conv_l{i}')(x)
                 
-        x = layers.Conv1D(64, kernel_size=1, padding="same", activation=self.activation, name='mixer_1x1')(x)
+        x = layers.Conv1D(92, kernel_size=1, padding="same", activation=self.activation, name='mixer_1x1')(x)
 
         output = layers.Conv1D(self.K, kernel_size=1, padding="same", name='output')(x)
         mymodel = models.Model(inputs=inputs, outputs=output)
