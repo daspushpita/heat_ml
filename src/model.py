@@ -68,6 +68,8 @@ class cnn_models():
     def __init__(self, nx, dim,
                 n_channels, kernel_size,
                 n_layer, K,
+                N_diff=1,
+                diffusion_coeff=None,
                 activation='relu',
                  *args, **kwargs):
         """
@@ -83,6 +85,8 @@ class cnn_models():
         self.n_layers = n_layer
         self.K = K
         self.activation = activation
+        self.N_diff = len(diffusion_coeff) if diffusion_coeff is not None else N_diff
+        self.diffusion_coeff = diffusion_coeff
         
 
     def cnn_model_1d_single_diff(self):
@@ -120,7 +124,7 @@ class cnn_models():
             model_cnn (tf.keras.Model): Compiled 1D CNN model ready for training.
         """
         # Input shape: (nx, 2) — scalar value at each grid point
-        inputs = Input(shape=(self.nx,10), name = 'input_layer')
+        inputs = Input(shape=(self.nx, self.dim), name = 'input_layer')
         # Convolutional layers to extract spatial features
         x = layers.Conv1D(32, kernel_size=5, padding='same', activation='tanh', name='conv1')(inputs)
         x = layers.Conv1D(32, kernel_size=5, padding='same', activation='tanh', name='conv2')(x)
@@ -133,6 +137,7 @@ class cnn_models():
 
         # Define the model
         model_cnn = models.Model(inputs=inputs, outputs=output, name='cnn_pos_enc_model')
+        self.model_cont = model_cnn
         return model_cnn
     
 

@@ -34,7 +34,8 @@ class data_generator_simple_nn():
     optionally skipping time steps and holding out test data.
     """
     def __init__(self, path, holdout, nsteps, dim, csv=1, npz=0, 
-                 x_res=100, gen=0, skip=0, pos=0, *args, **kwargs):
+                x_res=100, gen=0, skip=0, pos=0, 
+                N_diff=1, diffusion_coeff=None,*args, **kwargs):
         
         self.filename = path
         self.dim = dim
@@ -46,6 +47,8 @@ class data_generator_simple_nn():
         self.skip = skip
         self.nsteps = nsteps
         self.pos = pos
+        self.N_diff = len(diffusion_coeff) if diffusion_coeff is not None else N_diff
+        self.diffusion_coeff = diffusion_coeff
 
     def read_1d(self):
         
@@ -146,7 +149,99 @@ class data_generator_simple_nn():
             return X_train, Y_train, X_test, Y_test, self.x, t_all
         else:
             return X_train, Y_train, X_test, Y_test, self.x, t_all
+        
+        
+    def read_1d_gen_coeff(self):
+        
+        training_Ds = self.diffusion_coeff
+        training_Ds_norm = (training_Ds - np.min(training_Ds)) / (np.max(training_Ds) - np.min(training_Ds))
 
+        #Xgrid values and time values from one of the diffusion coefficients
+        output_dir_0 = os.path.join(self.filename, f"diffusion{str(0.01).replace('.', '.')}/")
+        files_0 = sorted(
+            [f for f in os.listdir(output_dir_0) if f.startswith('data_') and f.endswith('.csv')],
+            key=lambda s: int(s.split('_')[1].split('.')[0])
+        )
+        data_0 = pd.read_csv(os.path.join(output_dir_0, files_0[0]))
+        
+        #Get the x grid and positional encodings
+        self.x = data_0["x"].values
+        x_min, x_max = self.x.min(), self.x.max()
+        x_norm = (self.x - x_min) / (x_max - x_min + 1e-12)
+        d_model = 2
+        pos_enc = Positional_Encoding(x_norm, d_model=d_model).sinosoidal_encoding()
+        
+        #get the time array
+        nt = len(files_0)
+        t_all = np.zeros((nt,))
+        for i, file in enumerate(files_0):
+            data_all = pd.read_csv(os.path.join(output_dir_0, file))
+            t_all[i] = data_all["t"].iloc[0]
+        
+
+        #################################################################################
+        
+        X_train_list, Y_train_list = [], []
+        X_test_list,  Y_test_list  = [], []
+        
+        for D, Dn in zip(training_Ds, training_Ds_norm):
+            output_dir = os.path.join(self.filename, f"diffusion{str(D).replace('.', '.')}/")
+            files = sorted(
+                [f for f in os.listdir(output_dir) if f.startswith('data_') and f.endswith('.csv')],
+                key=lambda s: int(s.split('_')[1].split('.')[0])
+            )
+            nt = len(files)
+            k  = int(self.nsteps)
+            num_samples = nt - k
+            
+            u_all = np.zeros((nt, self.nx))
+            X_data_D = np.zeros((num_samples, self.nx, 1))
+            for i, file in enumerate(files):
+                data = pd.read_csv(os.path.join(output_dir, file))
+                u_all[i] = data.filter(like='u_t').values.flatten()
+            
+            X_data_D[..., 0] = u_all[:num_samples]
+            pe_all = np.broadcast_to(pos_enc[None, ...], (num_samples, self.nx, d_model))
+            Dcoeff = np.full((num_samples, self.nx, 1), Dn)
+            
+            X_data_D = np.concatenate((X_data_D, pe_all, Dcoeff), axis=-1)
+            
+            # Build multi-step Y: (samples, nx, k)
+            Y_data_D = np.stack([u_all[i+1:i+1+k] for i in range(num_samples)], axis=0)  
+            Y_data_D = np.transpose(Y_data_D, (0, 2, 1))
+
+            # Split training vs held-out
+            if self.holdout > 0:
+                if self.holdout >= num_samples:
+                    raise ValueError(f"holdout ({self.holdout}) must be < samples ({num_samples}).")
+                
+                X_train_list.append(X_data_D[:-self.holdout])
+                Y_train_list.append(Y_data_D[:-self.holdout])
+                X_test_list.append(X_data_D[-self.holdout:])
+                Y_test_list.append(Y_data_D[-self.holdout:])
+            else:
+                X_train_list.append(X_data_D)
+                Y_train_list.append(Y_data_D)
+            
+        # concat across coefficients
+        X_train = np.concatenate(X_train_list, axis=0)
+        Y_train = np.concatenate(Y_train_list, axis=0)
+        
+        if self.holdout > 0:
+            X_test = np.concatenate(X_test_list, axis=0)
+            Y_test = np.concatenate(Y_test_list, axis=0)
+        else:
+            X_test, Y_test = None, None
+        #################################################################################       
+        # final feature dim for model
+        self.dim = 1 + d_model + 1  # u + PE + ν
+        #################################################################################
+        if self.gen:
+            return X_train, Y_train, X_test, Y_test, self.x, t_all
+        else:
+            return X_train, Y_train, X_test, Y_test, self.x, t_all
+
+        
         
 class pinn_single_D():
         
